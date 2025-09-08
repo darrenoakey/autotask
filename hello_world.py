@@ -1,3 +1,6 @@
+"""Simple Hello World module."""
+
+
 class HelloWorld:
     def greet(self) -> None:
         print('Hello, world!')
@@ -5,4 +8,3 @@ class HelloWorld:
 
 if __name__ == "__main__":
     HelloWorld().greet()
-
