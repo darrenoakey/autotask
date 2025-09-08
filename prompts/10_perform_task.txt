@@ -1,0 +1,30 @@
+Stage: perform
+
+Objective: Plan and execute the task pragmatically.
+
+Deliverables:
+- A concrete, minimal plan of steps and files to touch.
+- The exact commands to run, in order.
+- The implementation changes summarized by file.
+
+Inputs:
+- Task: {task}
+- Previous stage output (if any):
+---
+{previous_stage_output}
+---
+
+Instructions:
+- First, choose the working directory for this task:
+  - If creating a new directory (e.g., for generated artifacts), use that path as the working dir.
+  - Otherwise, use the current repository or subdirectory you will modify.
+  - Output a single line: WORKING_DIR: <path>
+- Propose the shortest path to a working solution.
+- If code changes are needed, provide patches or file contents.
+- Stop after a complete, coherent step set. Do not skip validation.
+
+Output format:
+- WORKING_DIR: <path>
+- Short plan (bulleted)
+- Commands to run (assume CWD = WORKING_DIR)
+- Summary of changes by file

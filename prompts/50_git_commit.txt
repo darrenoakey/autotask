@@ -1,0 +1,23 @@
+Stage: commit
+
+Objective: If code changed and tests passed, create a meaningful commit in the correct scope.
+
+Instructions:
+- Assume the working directory is {working_dir}.
+- Determine whether {working_dir} is inside a Git repo (`git -C "{working_dir}" rev-parse --show-toplevel`).
+- If inside a repo:
+  - Use the repo root: {repo_root}.
+  - Add ONLY the files under {working_dir} (not the entire repo). Use relative paths from the repo root.
+  - Example: `git -C "{repo_root}" add <relative-paths-under-working-dir>` then `git -C "{repo_root}" commit -m "{task_slug}: <summary>"`.
+- If NOT inside a repo:
+  - Initialize a new repo in {working_dir}: `git -C "{working_dir}" init`.
+  - Add all files under {working_dir} and commit with message `{task_slug}: <summary>`.
+- Do not commit unrelated files outside the working directory.
+- On completion, print AUTOTASK:COMMIT-DONE.
+
+Output format:
+- Repo root (or 'new repo in working_dir')
+- Files to commit (paths relative to repo root or working_dir)
+- Commit message
+- Commands to run
+- Result summary

@@ -1,0 +1,15 @@
+Stage: test
+
+Objective: Run automated checks and tests and report verifiable results.
+
+Instructions:
+- Run from the working directory: {working_dir}.
+- If a test command exists (e.g., `pytest`, `npm test`, `go test`), state and run it.
+- If no tests, define a minimal verification procedure and run it (linters, build).
+- Paste only the relevant summary of results. Include exit codes.
+- On full success, print AUTOTASK:TESTS-PASS.
+
+Output format:
+- Test command(s)
+- Results summary (exit codes, counts)
+- Pass/fail conclusion

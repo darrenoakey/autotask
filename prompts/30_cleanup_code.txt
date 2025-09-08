@@ -1,0 +1,13 @@
+Stage: cleanup
+
+Objective: Refactor and tidy the code without changing behavior.
+
+Instructions:
+- Assume the working directory is {working_dir}.
+- Apply small, safe improvements: naming, dead code removal, docs, formatting.
+- Note any riskier refactors separately and justify.
+- Keep diffs minimal; do not churn unrelated files.
+
+Output format:
+- Cleanup summary
+- Patches or instructions per file

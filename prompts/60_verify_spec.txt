@@ -1,0 +1,14 @@
+Stage: verify
+
+Objective: Verify that the task is complete and meets the specification.
+
+Instructions:
+- Cross-check deliverables against the task description and acceptance criteria.
+- If anything is missing or ambiguous, list concrete gaps and propose next actions.
+- If everything is done and tested, print AUTOTASK:SUCCESS.
+- Confirm that commits are scoped to the working directory ({working_dir}) and do not include unrelated files.
+
+Output format:
+- Checklist of requirements with pass/fail
+- Gaps (if any) with next steps
+- Final verdict

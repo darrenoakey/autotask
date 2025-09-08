@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import re
+import subprocess
+import threading
+import sys
+from collections import UserDict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+try:
+    from colorama import init as _colorama_init, Fore, Back, Style
+    _colorama_init()
+except Exception:
+    class _Dummy:
+        def __getattr__(self, _):
+            return ""
+    Fore = Back = Style = _Dummy()
+
+
+class SafeDict(UserDict):
+    def __missing__(self, key):
+        return ""  # missing template variables resolve to empty string
+
+
+def script_paths() -> Tuple[Path, Path, Path]:
+    here = Path(__file__).resolve().parent
+    prompts_dir = here / "prompts"
+    work_dir = here / "work"
+    return here, prompts_dir, work_dir
+
+
+def ensure_dirs(*paths: Path) -> None:
+    for p in paths:
+        p.mkdir(parents=True, exist_ok=True)
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def slugify(text: str, max_len: int = 80) -> str:
+    text = text.strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    if not text:
+        text = "task"
+    return text[:max_len].strip("-") or "task"
+
+
+def load_prompt(prompts_dir: Path, name: str, variables: Dict[str, str]) -> str:
+    path = prompts_dir / name
+    template = read_text(path)
+    return template.format_map(SafeDict(variables))
+
+
+def timestamp() -> str:
+    # Use timezone-aware UTC to avoid deprecation
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_cli_command(cmd: List[str], input_text: str) -> Tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_text.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8", errors="replace"), proc.stderr.decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return 127, "", f"Command not found: {' '.join(cmd)}"
+
+
+# Provider stubs -------------------------------------------------------------
+
+def _detect_claude_cmd() -> Optional[List[str]]:
+    """Build a default Claude command if available on PATH.
+
+    Honors optional env vars:
+      - AUTOTASK_CLAUDE_BIN (default: 'claude')
+      - AUTOTASK_CLAUDE_ARGS (appended as-is, split on whitespace)
+    """
+    import shutil as _sh
+    bin_name = os.environ.get("AUTOTASK_CLAUDE_BIN", "claude")
+    if _sh.which(bin_name) is None:
+        return None
+    parts = [bin_name]
+    extra = os.environ.get("AUTOTASK_CLAUDE_ARGS")
+    if extra:
+        parts.extend(extra.split())
+    return parts
+
+
+def call_claude(prompt: str) -> Tuple[str, str]:
+    """Invoke Claude exactly like fix_mr: headless with permission bypass.
+
+    - Streams both stdout and stderr to the console as it runs.
+    - Returns captured (stdout, stderr) as strings.
+    - No environment variable configuration; uses 'claude' on PATH.
+    - Uses current working directory so Claude can act on local files.
+    """
+    cmd = [
+        "claude",
+        "--permission-mode",
+        "bypassPermissions",
+        "--print",
+        prompt,
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        # Mirror failure without env fallbacks
+        return "", "Command not found: claude"
+
+    stdout_chunks: List[str] = []
+    stderr_chunks: List[str] = []
+
+    def _reader(stream, sink, is_err: bool):
+        for line in iter(stream.readline, ""):
+            sink.append(line)
+            try:
+                if is_err:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+                else:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+            except Exception:
+                pass
+        stream.close()
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks, False), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks, True), daemon=True)
+    t_out.start(); t_err.start()
+
+    proc.wait()
+    t_out.join(); t_err.join()
+
+    return ("".join(stdout_chunks), "".join(stderr_chunks))
+
+
+def call_gemini(prompt: str) -> Tuple[str, str]:
+    """Invoke Gemini CLI in non-interactive mode, streaming output.
+
+    Uses the official @google/gemini-cli:
+      -p/--prompt for non-interactive mode
+      -y/--yolo to auto-approve actions (headless)
+    """
+    cmd = ["gemini", "--prompt", prompt, "--yolo"]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        return "", "Command not found: gemini"
+
+    stdout_chunks: List[str] = []
+    stderr_chunks: List[str] = []
+
+    def _reader(stream, sink, is_err: bool):
+        for line in iter(stream.readline, ""):
+            sink.append(line)
+            try:
+                if is_err:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+                else:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+            except Exception:
+                pass
+        stream.close()
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks, False), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks, True), daemon=True)
+    t_out.start(); t_err.start()
+
+    proc.wait()
+    t_out.join(); t_err.join()
+
+    return ("".join(stdout_chunks), "".join(stderr_chunks))
+
+
+def call_codex(prompt: str) -> Tuple[int, str, str]:
+    """Invoke the local 'codex' CLI, passing the prompt via stdin.
+
+    Assumes a non-interactive mode where the tool reads from stdin and writes
+    the response to stdout. No environment configuration is supported.
+    """
+    try:
+        from pathlib import Path as _Path
+        proc = subprocess.Popen(
+            [
+                "codex",
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "-C",
+                str(_Path.cwd()),
+                "-",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        return 127, "", "Command not found: codex"
+
+    try:
+        out, err = proc.communicate(input=prompt)
+    except Exception as e:
+        return 1, "", f"codex invocation failed: {e}"
+    return proc.returncode, (out or ""), (err or "")
+
+def provider_claude(prompt: str) -> Dict[str, str]:
+    out, err = call_claude(prompt)
+    # We cannot reliably get the exit code with Popen + stream threads after wait,
+    # but proc.returncode is accessible in call_claude if refactored. For now, infer ok by heuristics.
+    ok = True  # Assume ok; verify stage should judge success.
+    if not out and "Command not found" in err:
+        ok = False
+    return {
+        "provider": "claude",
+        "ok": str(ok).lower(),
+        "stdout": out,
+        "stderr": err,
+        "returncode": "0" if ok else "127",
+    }
+
+
+def provider_gemini(prompt: str) -> Dict[str, str]:
+    out, err = call_gemini(prompt)
+    ok = True
+    if not out and "Command not found" in err:
+        ok = False
+    return {
+        "provider": "gemini",
+        "ok": str(ok).lower(),
+        "stdout": out,
+        "stderr": err,
+        "returncode": "0" if ok else "127",
+    }
+
+
+def provider_codex(prompt: str) -> Dict[str, str]:
+    code, out, err = call_codex(prompt)
+    ok = (code == 0)
+    return {
+        "provider": "codex",
+        "ok": str(ok).lower(),
+        "stdout": out,
+        "stderr": err,
+        "returncode": str(code),
+    }
+
+
+# Orchestrator ---------------------------------------------------------------
+
+Stage = Tuple[str, str]  # (stage_key, prompt_file)
+
+
+def build_providers(order: Optional[List[str]] = None) -> List[Tuple[str, Callable[..., Dict[str, str]]]]:
+    name_to_fn = {
+        "claude": provider_claude,
+        "gemini": provider_gemini,
+        # codex temporarily disabled from rotation
+    }
+    if not order:
+        # Start with claude only, can extend later
+        return [("claude", provider_claude)]
+    providers: List[Tuple[str, Callable[..., Dict[str, str]]]] = []
+    for name in order:
+        if name == "codex":
+            print("codex provider is temporarily disabled and will be skipped.", file=sys.stderr)
+            continue
+        fn = name_to_fn.get(name)
+        if fn:
+            providers.append((name, fn))
+    if not providers:
+        providers = [("claude", provider_claude)]
+    return providers
+
+
+def round_robin_index(i: int, n: int) -> int:
+    return i % max(n, 1)
+
+
+def default_stages() -> List[Stage]:
+    return [
+        ("perform", "10_perform_task.txt"),
+        ("check_fix", "20_check_and_fix.txt"),
+        ("cleanup", "30_cleanup_code.txt"),
+        ("test", "40_run_tests.txt"),
+        ("commit", "50_git_commit.txt"),
+        ("verify", "60_verify_spec.txt"),
+    ]
+
+
+def detect_success(verify_output: str) -> bool:
+    # Success heuristic: look for explicit pass token or phrase
+    tokens = [
+        "AUTOTASK:SUCCESS",
+        "AUTOTASK::SUCCESS",
+        "ALL REQUIREMENTS MET",
+        "TASK COMPLETE",
+    ]
+    low = verify_output.strip().upper()
+    return any(tok in low for tok in (t.upper() for t in tokens))
+
+
+def read_task_input(task_arg: Optional[str], task_file: Optional[Path]) -> str:
+    if task_file:
+        return read_text(task_file)
+    if task_arg:
+        return task_arg
+    return ""
+
+
+def save_stage_io(base_dir: Path, attempt: int, stage: str, prompt: str, result: Dict[str, str]) -> None:
+    attempt_dir = base_dir / f"attempt_{attempt:02d}"
+    ensure_dirs(attempt_dir)
+    write_text(attempt_dir / f"{stage}.prompt.txt", prompt)
+    write_text(attempt_dir / f"{stage}.out.txt", result.get("stdout", ""))
+    write_text(attempt_dir / f"{stage}.err.txt", result.get("stderr", ""))
+    meta = {
+        "provider": result.get("provider"),
+        "returncode": result.get("returncode"),
+        "ok": result.get("ok"),
+        "timestamp": timestamp(),
+    }
+    write_text(attempt_dir / f"{stage}.meta.json", json.dumps(meta, indent=2))
+
+
+def extract_working_dir(text: str, base_cwd: Path) -> Optional[Path]:
+    if not text:
+        return None
+    m = re.search(r"^WORKING_DIR:\s*(.+)$", text, flags=re.MULTILINE)
+    if not m:
+        return None
+    raw = m.group(1).strip().strip("`\"')")
+    # Expand ~ and environment variables
+    raw = os.path.expandvars(os.path.expanduser(raw))
+    p = Path(raw)
+    if not p.is_absolute():
+        p = (base_cwd / p).resolve()
+    return p
+
+
+def detect_repo_root(path: Path) -> Optional[Path]:
+    try:
+        proc = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return Path(proc.stdout.strip()).resolve()
+    except Exception:
+        pass
+    return None
+
+
+def create_guide(
+    prompts_dir: Path,
+    work_task_dir: Path,
+    variables: Dict[str, str],
+    call_provider: Callable[[str], Dict[str, str]],
+) -> str:
+    guide_prompt = load_prompt(prompts_dir, "70_create_guide.txt", variables)
+    res = call_provider(guide_prompt)
+    guide_text = res.get("stdout", "")
+    write_text(work_task_dir / "guide.md", guide_text)
+    return guide_text
+
+
+def orchestrate(
+    task: str,
+    *,
+    provider_order: Optional[List[str]],
+    max_rounds: int,
+) -> int:
+    here, prompts_dir, work_dir = script_paths()
+    ensure_dirs(prompts_dir, work_dir)
+
+    task_slug = slugify(task.splitlines()[0] if task else "task")
+    work_task_dir = work_dir / task_slug
+    ensure_dirs(work_task_dir)
+
+    # Load prior guide if exists, include in prompts
+    guide_path = work_task_dir / "guide.md"
+    prior_guide = read_text(guide_path) if guide_path.exists() else ""
+
+    providers = build_providers(provider_order)
+
+    # No availability checks; assume required CLIs are present
+    stages = default_stages()
+
+    last_outputs: Dict[str, str] = {}
+    attempt = 1
+    provider_i = 0
+    detected_working_dir: Path = Path.cwd()
+
+    while attempt <= max_rounds:
+        # Pretty banner for a new attempt
+        banner_line = "=" * 72
+        print(
+            f"{Style.BRIGHT}{Fore.CYAN}{banner_line}{Style.RESET_ALL}\n"
+            f"{Style.BRIGHT}{Fore.CYAN} AUTOTASK ATTEMPT {attempt} {Style.RESET_ALL}"
+        )
+        print(f"{Fore.CYAN}Working dir: {Style.RESET_ALL}{detected_working_dir}")
+        rr = detect_repo_root(detected_working_dir)
+        print(f"{Fore.CYAN}Repo root : {Style.RESET_ALL}{rr if rr else '(none)'}")
+        print(f"{Style.BRIGHT}{Fore.CYAN}{banner_line}{Style.RESET_ALL}")
+
+        prior_guide = read_text(guide_path) if guide_path.exists() else prior_guide
+        # compute repo root for current working dir
+        repo_root = rr
+        base_variables: Dict[str, str] = {
+            "task": task,
+            "task_slug": task_slug,
+            "work_dir": str(work_task_dir),
+            "attempt": str(attempt),
+            "timestamp": timestamp(),
+            "previous_output": last_outputs.get("verify") or last_outputs.get("test") or last_outputs.get("cleanup") or last_outputs.get("check_fix") or last_outputs.get("perform") or "",
+            "guide_text": prior_guide,
+            "working_dir": str(detected_working_dir),
+            "repo_root": str(repo_root) if repo_root else "",
+            "is_git_repo": "true" if repo_root else "false",
+        }
+
+        # Sequential stages for this attempt
+        for (stage_key, prompt_file) in stages:
+            # Recompute base instructions each stage to incorporate any updated variables
+            base_instr = load_prompt(prompts_dir, "00_base_instructions.txt", base_variables)
+            vars_stage = dict(base_variables)
+            vars_stage.update({
+                "stage": stage_key,
+                "previous_stage_output": last_outputs.get(stage_key, ""),
+            })
+            stage_prompt = base_instr + "\n\n" + load_prompt(prompts_dir, prompt_file, vars_stage)
+
+            prov_name, prov_fn = providers[round_robin_index(provider_i, len(providers))]
+            print(f"\n{Style.BRIGHT}{Fore.MAGENTA}>>> Stage [{stage_key.upper()}] via {prov_name}{Style.RESET_ALL}")
+            provider_i += 1
+
+            result = prov_fn(stage_prompt)
+
+            save_stage_io(work_task_dir, attempt, stage_key, stage_prompt, result)
+            last_outputs[stage_key] = result.get("stdout", "")
+
+            # After perform stage, allow the assistant to declare a working directory
+            if stage_key == "perform":
+                wd = extract_working_dir(last_outputs.get("perform", ""), Path.cwd())
+                if wd:
+                    detected_working_dir = wd
+                    repo_root = detect_repo_root(detected_working_dir)
+                    base_variables.update({
+                        "working_dir": str(detected_working_dir),
+                        "repo_root": str(repo_root) if repo_root else "",
+                        "is_git_repo": "true" if repo_root else "false",
+                    })
+
+        # After stages, create/update the guide for next attempt
+        guide_vars = dict(base_variables)
+        guide_vars.update({
+            "final_output": last_outputs.get("verify", ""),
+            "all_outputs_json": json.dumps(last_outputs, indent=2),
+        })
+        # Use next provider in rotation to generate the guide
+        next_index = round_robin_index(provider_i, len(providers))
+        next_prov_name, next_prov_fn = providers[next_index]
+        print(f"\n{Style.BRIGHT}{Fore.MAGENTA}>>> Guide via {next_prov_name}{Style.RESET_ALL}")
+        create_guide(
+            prompts_dir,
+            work_task_dir,
+            guide_vars,
+            lambda p: next_prov_fn(p),
+        )
+        # Advance rotation so the next attempt starts fairly
+        provider_i += 1
+
+        # Decide success based on verify output
+        if detect_success(last_outputs.get("verify", "")):
+            print(f"{Style.BRIGHT}{Fore.GREEN}✔ autotask: success after attempt {attempt}{Style.RESET_ALL}")
+            return 0
+
+        print(f"{Fore.YELLOW}autotask: attempt {attempt} incomplete, retrying…{Style.RESET_ALL}")
+        attempt += 1
+
+    print(f"{Fore.RED}autotask: reached max attempts without success{Style.RESET_ALL}")
+    return 1
+
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="autotask",
+        description="Orchestrate multi-step CLI AI task execution with retries.",
+    )
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("task", nargs="?", help="Task description string")
+    src.add_argument("--task-file", type=Path, help="Path to a file containing the task")
+
+    p.add_argument("--providers", type=str, default="", help="Comma list of providers (claude,gemini). Default uses claude only.")
+    p.add_argument("--max-rounds", type=int, default=5, help="Maximum retry attempts")
+    return p.parse_args(argv)
+
+
+def main(argv: List[str]) -> int:
+    args = parse_args(argv)
+    task_text = read_task_input(args.task, args.task_file)
+    if not task_text.strip():
+        print("No task provided.", file=sys.stderr)
+        return 2
+    order = [s.strip() for s in args.providers.split(",") if s.strip()] or None
+    return orchestrate(
+        task_text,
+        provider_order=order,
+        max_rounds=args.max_rounds,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

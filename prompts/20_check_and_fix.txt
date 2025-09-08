@@ -1,0 +1,20 @@
+Stage: check_fix
+
+Objective: Identify problems and fix them.
+
+Inputs:
+- Output from perform stage:
+---
+{previous_output}
+---
+
+Instructions:
+- Assume the working directory is {working_dir}.
+- List concrete issues found (missing files, failing commands, inconsistencies).
+- Propose specific fixes with exact commands and code changes.
+- Re-run or simulate checks to confirm fixes. Provide evidence.
+
+Output format:
+- Issues found
+- Fixes applied (commands + patches)
+- Evidence of correctness
