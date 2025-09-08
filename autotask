@@ -104,7 +104,7 @@ def _detect_claude_cmd() -> Optional[List[str]]:
     return parts
 
 
-def call_claude(prompt: str) -> Tuple[str, str]:
+def call_claude(prompt: str, cwd: Path) -> Tuple[str, str]:
     """Invoke Claude exactly like fix_mr: headless with permission bypass.
 
     - Streams both stdout and stderr to the console as it runs.
@@ -126,6 +126,7 @@ def call_claude(prompt: str) -> Tuple[str, str]:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            cwd=cwd,
         )
     except FileNotFoundError:
         # Mirror failure without env fallbacks
@@ -158,7 +159,7 @@ def call_claude(prompt: str) -> Tuple[str, str]:
     return ("".join(stdout_chunks), "".join(stderr_chunks))
 
 
-def call_gemini(prompt: str) -> Tuple[str, str]:
+def call_gemini(prompt: str, cwd: Path) -> Tuple[str, str]:
     """Invoke Gemini CLI in non-interactive mode, streaming output.
 
     Uses the official @google/gemini-cli:
@@ -174,6 +175,7 @@ def call_gemini(prompt: str) -> Tuple[str, str]:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return "", "Command not found: gemini"
@@ -239,8 +241,8 @@ def call_codex(prompt: str) -> Tuple[int, str, str]:
         return 1, "", f"codex invocation failed: {e}"
     return proc.returncode, (out or ""), (err or "")
 
-def provider_claude(prompt: str) -> Dict[str, str]:
-    out, err = call_claude(prompt)
+def provider_claude(prompt: str, cwd: Path) -> Dict[str, str]:
+    out, err = call_claude(prompt, cwd)
     # We cannot reliably get the exit code with Popen + stream threads after wait,
     # but proc.returncode is accessible in call_claude if refactored. For now, infer ok by heuristics.
     ok = True  # Assume ok; verify stage should judge success.
@@ -255,8 +257,8 @@ def provider_claude(prompt: str) -> Dict[str, str]:
     }
 
 
-def provider_gemini(prompt: str) -> Dict[str, str]:
-    out, err = call_gemini(prompt)
+def provider_gemini(prompt: str, cwd: Path) -> Dict[str, str]:
+    out, err = call_gemini(prompt, cwd)
     ok = True
     if not out and "Command not found" in err:
         ok = False
@@ -385,10 +387,11 @@ def create_guide(
     prompts_dir: Path,
     work_task_dir: Path,
     variables: Dict[str, str],
-    call_provider: Callable[[str], Dict[str, str]],
+    call_provider: Callable[[str, Path], Dict[str, str]],
+    cwd: Path,
 ) -> str:
     guide_prompt = load_prompt(prompts_dir, "70_create_guide.txt", variables)
-    res = call_provider(guide_prompt)
+    res = call_provider(guide_prompt, cwd)
     guide_text = res.get("stdout", "")
     write_text(work_task_dir / "guide.md", guide_text)
     return guide_text
@@ -462,7 +465,7 @@ def orchestrate(
             prov_name, prov_fn = next(providers)
             print(f"\n{Style.BRIGHT}{Fore.MAGENTA}>>> Stage [{stage_key.upper()}] via {prov_name}{Style.RESET_ALL}")
 
-            result = prov_fn(stage_prompt)
+            result = prov_fn(stage_prompt, detected_working_dir)
 
             save_stage_io(work_task_dir, attempt, stage_key, stage_prompt, result)
             last_outputs[stage_key] = result.get("stdout", "")
@@ -492,7 +495,8 @@ def orchestrate(
             prompts_dir,
             work_task_dir,
             guide_vars,
-            lambda p: next_prov_fn(p),
+            lambda p, cwd: next_prov_fn(p, cwd),
+            detected_working_dir,
         )
 
         # Decide success based on verify output
@@ -516,7 +520,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     src.add_argument("task", nargs="?", help="Task description string")
     src.add_argument("--task-file", type=Path, help="Path to a file containing the task")
 
-    p.add_argument("--providers", type=str, default="gemini,claude", help="Comma list of providers (claude,gemini). Default uses both.")
+    p.add_argument("--providers", type=str, default="claude,gemini", help="Comma list of providers (claude,gemini). Default uses both.")
     p.add_argument("--max-rounds", type=int, default=5, help="Maximum retry attempts")
     return p.parse_args(argv)
 

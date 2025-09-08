@@ -10,8 +10,10 @@ Instructions:
   - Add ONLY the files under {working_dir} (not the entire repo). Use relative paths from the repo root.
   - Example: `git -C "{repo_root}" add <relative-paths-under-working-dir>` then `git -C "{repo_root}" commit -m "{task_slug}: <summary>"`.
 - If NOT inside a repo:
-  - Initialize a new repo in {working_dir}: `git -C "{working_dir}" init`.
-  - Add all files under {working_dir} and commit with message `{task_slug}: <summary>`.
+  - Check if {working_dir} is the same as or a subdirectory of {work_dir}.
+  - If it is, you can initialize a new repo in {working_dir}: `git -C "{working_dir}" init`.
+  - Then, add all files under {working_dir} and commit with message `{task_slug}: <summary>`.
+  - If {working_dir} is NOT in {work_dir}, then DO NOT initialize a new repository. Skip the commit step.
 - Do not commit unrelated files outside the working directory.
 - On completion, print AUTOTASK:COMMIT-DONE.
 
