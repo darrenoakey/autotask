@@ -6,6 +6,7 @@ import re
 import subprocess
 import threading
 import sys
+from itertools import cycle
 from collections import UserDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,7 +116,6 @@ def call_claude(prompt: str) -> Tuple[str, str]:
         "claude",
         "--permission-mode",
         "bypassPermissions",
-        "--print",
         prompt,
     ]
 
@@ -286,30 +286,28 @@ def provider_codex(prompt: str) -> Dict[str, str]:
 Stage = Tuple[str, str]  # (stage_key, prompt_file)
 
 
-def build_providers(order: Optional[List[str]] = None) -> List[Tuple[str, Callable[..., Dict[str, str]]]]:
+def build_providers(order: Optional[List[str]] = None) -> cycle:
     name_to_fn = {
         "claude": provider_claude,
         "gemini": provider_gemini,
-        # codex temporarily disabled from rotation
     }
     if not order:
-        # Start with claude only, can extend later
-        return [("claude", provider_claude)]
-    providers: List[Tuple[str, Callable[..., Dict[str, str]]]] = []
+        order = ["claude", "gemini"]
+    
+    providers = []
     for name in order:
-        if name == "codex":
-            print("codex provider is temporarily disabled and will be skipped.", file=sys.stderr)
-            continue
         fn = name_to_fn.get(name)
         if fn:
             providers.append((name, fn))
+    
     if not providers:
-        providers = [("claude", provider_claude)]
-    return providers
+        # Default to all known providers if the provided order is empty or invalid
+        providers = [(name, func) for name, func in name_to_fn.items()]
+
+    return cycle(providers)
 
 
-def round_robin_index(i: int, n: int) -> int:
-    return i % max(n, 1)
+
 
 
 def default_stages() -> List[Stage]:
@@ -420,8 +418,7 @@ def orchestrate(
 
     last_outputs: Dict[str, str] = {}
     attempt = 1
-    provider_i = 0
-    detected_working_dir: Path = Path.cwd()
+    detected_working_dir: Path = Path.home()
 
     while attempt <= max_rounds:
         # Pretty banner for a new attempt
@@ -462,9 +459,8 @@ def orchestrate(
             })
             stage_prompt = base_instr + "\n\n" + load_prompt(prompts_dir, prompt_file, vars_stage)
 
-            prov_name, prov_fn = providers[round_robin_index(provider_i, len(providers))]
+            prov_name, prov_fn = next(providers)
             print(f"\n{Style.BRIGHT}{Fore.MAGENTA}>>> Stage [{stage_key.upper()}] via {prov_name}{Style.RESET_ALL}")
-            provider_i += 1
 
             result = prov_fn(stage_prompt)
 
@@ -473,7 +469,7 @@ def orchestrate(
 
             # After perform stage, allow the assistant to declare a working directory
             if stage_key == "perform":
-                wd = extract_working_dir(last_outputs.get("perform", ""), Path.cwd())
+                wd = extract_working_dir(last_outputs.get("perform", ""), detected_working_dir)
                 if wd:
                     detected_working_dir = wd
                     repo_root = detect_repo_root(detected_working_dir)
@@ -490,8 +486,7 @@ def orchestrate(
             "all_outputs_json": json.dumps(last_outputs, indent=2),
         })
         # Use next provider in rotation to generate the guide
-        next_index = round_robin_index(provider_i, len(providers))
-        next_prov_name, next_prov_fn = providers[next_index]
+        next_prov_name, next_prov_fn = next(providers)
         print(f"\n{Style.BRIGHT}{Fore.MAGENTA}>>> Guide via {next_prov_name}{Style.RESET_ALL}")
         create_guide(
             prompts_dir,
@@ -499,8 +494,6 @@ def orchestrate(
             guide_vars,
             lambda p: next_prov_fn(p),
         )
-        # Advance rotation so the next attempt starts fairly
-        provider_i += 1
 
         # Decide success based on verify output
         if detect_success(last_outputs.get("verify", "")):
@@ -523,7 +516,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     src.add_argument("task", nargs="?", help="Task description string")
     src.add_argument("--task-file", type=Path, help="Path to a file containing the task")
 
-    p.add_argument("--providers", type=str, default="", help="Comma list of providers (claude,gemini). Default uses claude only.")
+    p.add_argument("--providers", type=str, default="gemini,claude", help="Comma list of providers (claude,gemini). Default uses both.")
     p.add_argument("--max-rounds", type=int, default=5, help="Maximum retry attempts")
     return p.parse_args(argv)
 
